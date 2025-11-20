@@ -1,8 +1,8 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { collection, addDoc, onSnapshot, query, orderBy, getDocs } from 'firebase/firestore';
-import { db } from '@/lib/firebase';
+import { supabase } from '@/lib/supabase';
+import { useAuth } from '@/contexts/auth-context';
 import { ChatMessage, ClothingItem, Formalidade, Clima } from '@/lib/types';
 import { detectFormalidade, detectClima, generateResponse, getCategoriasParaClima } from '@/lib/ai-logic';
 import { Button } from '@/components/ui/button';
@@ -19,24 +19,61 @@ const climaIcons = {
 };
 
 export default function ChatbotStylish() {
+  const { user } = useAuth();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const q = query(collection(db, 'chatHistory'), orderBy('timestamp', 'asc'));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const messagesData = snapshot.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-        timestamp: doc.data().timestamp?.toDate(),
-      })) as ChatMessage[];
-      setMessages(messagesData);
-    });
+    if (!user) return;
 
-    return () => unsubscribe();
-  }, []);
+    loadMessages();
+
+    // Configurar real-time subscription
+    const channel = supabase
+      .channel('chatHistory-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'chatHistory',
+          filter: `userId=eq.${user.id}`,
+        },
+        () => {
+          loadMessages();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user]);
+
+  const loadMessages = async () => {
+    if (!user) return;
+
+    try {
+      const { data, error } = await supabase
+        .from('chatHistory')
+        .select('*')
+        .eq('userId', user.id)
+        .order('timestamp', { ascending: true });
+
+      if (error) throw error;
+
+      const messagesData = (data || []).map((msg) => ({
+        ...msg,
+        timestamp: new Date(msg.timestamp),
+      })) as ChatMessage[];
+
+      setMessages(messagesData);
+    } catch (error) {
+      console.error('Erro ao carregar mensagens:', error);
+    }
+  };
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -45,55 +82,65 @@ export default function ChatbotStylish() {
   }, [messages]);
 
   const montarLook = async (formalidade: Formalidade, clima?: Clima | null): Promise<ClothingItem[]> => {
-    const itemsSnapshot = await getDocs(collection(db, 'clothingItems'));
-    const allItems = itemsSnapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    })) as ClothingItem[];
+    if (!user) return [];
 
-    // Filtrar peças limpas e com a formalidade correta
-    let availableItems = allItems.filter(
-      (item) => item.status === 'Limpo' && item.formalidade === formalidade
-    );
+    try {
+      const { data, error } = await supabase
+        .from('clothingItems')
+        .select('*')
+        .eq('userId', user.id);
 
-    // Se clima foi detectado, filtrar por categorias adequadas
-    if (clima) {
-      const categoriasAdequadas = getCategoriasParaClima(clima);
-      availableItems = availableItems.filter((item) => 
-        categoriasAdequadas.includes(item.categoria)
+      if (error) throw error;
+
+      const allItems = (data || []) as ClothingItem[];
+
+      // Filtrar peças limpas e com a formalidade correta
+      let availableItems = allItems.filter(
+        (item) => item.status === 'Limpo' && item.formalidade === formalidade
       );
+
+      // Se clima foi detectado, filtrar por categorias adequadas
+      if (clima) {
+        const categoriasAdequadas = getCategoriasParaClima(clima);
+        availableItems = availableItems.filter((item) => 
+          categoriasAdequadas.includes(item.categoria)
+        );
+      }
+
+      // Categorias de topo e fundo
+      const topCategories = ['Blusa', 'Camisa', 'Blazer', 'Jaqueta', 'Moletom', 'Casaco'];
+      const bottomCategories = ['Calça', 'Saia', 'Shorts'];
+      const dressCategories = ['Vestido'];
+      const shoeCategories = ['Sapato', 'Tênis'];
+
+      const look: ClothingItem[] = [];
+
+      // Tentar montar look com vestido
+      const vestido = availableItems.find((item) => dressCategories.includes(item.categoria));
+      if (vestido) {
+        look.push(vestido);
+      } else {
+        // Montar look com top + bottom
+        const top = availableItems.find((item) => topCategories.includes(item.categoria));
+        const bottom = availableItems.find((item) => bottomCategories.includes(item.categoria));
+        
+        if (top) look.push(top);
+        if (bottom) look.push(bottom);
+      }
+
+      // Adicionar calçado
+      const shoe = availableItems.find((item) => shoeCategories.includes(item.categoria));
+      if (shoe) look.push(shoe);
+
+      return look;
+    } catch (error) {
+      console.error('Erro ao montar look:', error);
+      return [];
     }
-
-    // Categorias de topo e fundo
-    const topCategories = ['Blusa', 'Camisa', 'Blazer', 'Jaqueta', 'Moletom', 'Casaco'];
-    const bottomCategories = ['Calça', 'Saia', 'Shorts'];
-    const dressCategories = ['Vestido'];
-    const shoeCategories = ['Sapato', 'Tênis'];
-
-    const look: ClothingItem[] = [];
-
-    // Tentar montar look com vestido
-    const vestido = availableItems.find((item) => dressCategories.includes(item.categoria));
-    if (vestido) {
-      look.push(vestido);
-    } else {
-      // Montar look com top + bottom
-      const top = availableItems.find((item) => topCategories.includes(item.categoria));
-      const bottom = availableItems.find((item) => bottomCategories.includes(item.categoria));
-      
-      if (top) look.push(top);
-      if (bottom) look.push(bottom);
-    }
-
-    // Adicionar calçado
-    const shoe = availableItems.find((item) => shoeCategories.includes(item.categoria));
-    if (shoe) look.push(shoe);
-
-    return look;
   };
 
   const handleSend = async () => {
-    if (!input.trim()) return;
+    if (!input.trim() || !user) return;
 
     const userMessage = input.trim();
     setInput('');
@@ -101,11 +148,16 @@ export default function ChatbotStylish() {
 
     try {
       // Salvar mensagem do usuário
-      await addDoc(collection(db, 'chatHistory'), {
-        role: 'user',
-        content: userMessage,
-        timestamp: new Date(),
-      });
+      const { error: userError } = await supabase
+        .from('chatHistory')
+        .insert({
+          userId: user.id,
+          role: 'user',
+          content: userMessage,
+          timestamp: new Date().toISOString(),
+        });
+
+      if (userError) throw userError;
 
       // Detectar formalidade e clima
       const formalidade = detectFormalidade(userMessage);
@@ -118,12 +170,17 @@ export default function ChatbotStylish() {
       const responseText = generateResponse(formalidade, look.length > 0, clima);
 
       // Salvar resposta da IA
-      await addDoc(collection(db, 'chatHistory'), {
-        role: 'assistant',
-        content: responseText,
-        lookSuggestion: look,
-        timestamp: new Date(),
-      });
+      const { error: assistantError } = await supabase
+        .from('chatHistory')
+        .insert({
+          userId: user.id,
+          role: 'assistant',
+          content: responseText,
+          lookSuggestion: look,
+          timestamp: new Date().toISOString(),
+        });
+
+      if (assistantError) throw assistantError;
     } catch (error) {
       console.error('Erro ao processar mensagem:', error);
     } finally {

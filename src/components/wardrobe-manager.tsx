@@ -1,8 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { collection, addDoc, onSnapshot, query, orderBy, deleteDoc, doc, where } from 'firebase/firestore';
-import { db } from '@/lib/firebase';
+import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/auth-context';
 import { ClothingItem, Formalidade } from '@/lib/types';
 import { Button } from '@/components/ui/button';
@@ -52,26 +51,55 @@ export default function WardrobeManager({ onDataUpdate }: WardrobeManagerProps) 
   useEffect(() => {
     if (!user) return;
 
-    const q = query(
-      collection(db, 'clothingItems'),
-      where('userId', '==', user.uid),
-      orderBy('createdAt', 'desc')
-    );
-    
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const itemsData = snapshot.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-        createdAt: doc.data().createdAt?.toDate(),
+    loadItems();
+
+    // Configurar real-time subscription
+    const channel = supabase
+      .channel('clothingItems-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'clothingItems',
+          filter: `userId=eq.${user.id}`,
+        },
+        () => {
+          loadItems();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user]);
+
+  const loadItems = async () => {
+    if (!user) return;
+
+    try {
+      const { data, error } = await supabase
+        .from('clothingItems')
+        .select('*')
+        .eq('userId', user.id)
+        .order('createdAt', { ascending: false });
+
+      if (error) throw error;
+
+      const itemsData = (data || []).map((item) => ({
+        ...item,
+        createdAt: new Date(item.createdAt),
       })) as ClothingItem[];
+
       setItems(itemsData);
       if (onDataUpdate) {
         onDataUpdate();
       }
-    });
-
-    return () => unsubscribe();
-  }, [user, onDataUpdate]);
+    } catch (error) {
+      console.error('Erro ao carregar itens:', error);
+    }
+  };
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -119,16 +147,20 @@ export default function WardrobeManager({ onDataUpdate }: WardrobeManagerProps) 
 
     setLoading(true);
     try {
-      await addDoc(collection(db, 'clothingItems'), {
-        userId: user.uid,
-        nome,
-        categoria,
-        cor,
-        formalidade: formalidadesSelecionadas.length === 1 ? formalidadesSelecionadas[0] : formalidadesSelecionadas,
-        status: 'Limpo',
-        imageUrl: imagePreview,
-        createdAt: new Date(),
-      });
+      const { error } = await supabase
+        .from('clothingItems')
+        .insert({
+          userId: user.id,
+          nome,
+          categoria,
+          cor,
+          formalidade: formalidadesSelecionadas.length === 1 ? formalidadesSelecionadas[0] : formalidadesSelecionadas,
+          status: 'Limpo',
+          imageUrl: imagePreview,
+          createdAt: new Date().toISOString(),
+        });
+
+      if (error) throw error;
 
       toast.success('Peça adicionada com sucesso! 🎉');
       setNome('');
@@ -149,7 +181,13 @@ export default function WardrobeManager({ onDataUpdate }: WardrobeManagerProps) 
 
   const handleDelete = async (id: string) => {
     try {
-      await deleteDoc(doc(db, 'clothingItems', id));
+      const { error } = await supabase
+        .from('clothingItems')
+        .delete()
+        .eq('id', id);
+
+      if (error) throw error;
+
       toast.success('Peça removida!');
     } catch (error) {
       console.error('Erro ao remover peça:', error);

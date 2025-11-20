@@ -7,8 +7,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { CalendarLook, ClothingItem } from '@/lib/types';
-import { collection, addDoc, query, getDocs, deleteDoc, doc, where } from 'firebase/firestore';
-import { db } from '@/lib/firebase';
+import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/auth-context';
 import { toast } from 'sonner';
 
@@ -36,16 +35,14 @@ export default function CalendarView({ clothingItems }: CalendarViewProps) {
     if (!user) return;
 
     try {
-      const q = query(
-        collection(db, 'calendarLooks'),
-        where('userId', '==', user.uid)
-      );
-      const snapshot = await getDocs(q);
-      const looks = snapshot.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-      })) as CalendarLook[];
-      setCalendarLooks(looks);
+      const { data, error } = await supabase
+        .from('calendar')
+        .select('*')
+        .eq('userId', user.id);
+
+      if (error) throw error;
+
+      setCalendarLooks(data || []);
     } catch (error) {
       console.error('Erro ao carregar looks do calendário:', error);
     }
@@ -102,13 +99,17 @@ export default function CalendarView({ clothingItems }: CalendarViewProps) {
     try {
       const items = clothingItems.filter((item) => selectedItems.includes(item.id));
       
-      await addDoc(collection(db, 'calendarLooks'), {
-        userId: user.uid,
-        lookId: `look-${Date.now()}`,
-        date: selectedDate,
-        ocasiao,
-        items,
-      });
+      const { error } = await supabase
+        .from('calendar')
+        .insert({
+          userId: user.id,
+          lookId: `look-${Date.now()}`,
+          date: selectedDate,
+          ocasiao,
+          items,
+        });
+
+      if (error) throw error;
 
       toast.success('Look salvo no calendário!');
       setIsDialogOpen(false);
@@ -121,7 +122,13 @@ export default function CalendarView({ clothingItems }: CalendarViewProps) {
 
   const handleDeleteLook = async (lookId: string) => {
     try {
-      await deleteDoc(doc(db, 'calendarLooks', lookId));
+      const { error } = await supabase
+        .from('calendar')
+        .delete()
+        .eq('id', lookId);
+
+      if (error) throw error;
+
       toast.success('Look removido do calendário');
       loadCalendarLooks();
     } catch (error) {
