@@ -3,7 +3,7 @@ import { AuthProvider } from "@/contexts/auth-context";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Meu Guarda-Roupa",
+  title: "ClosetMind",
   description: "Organize suas roupas e crie looks incríveis",
 };
 
